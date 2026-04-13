@@ -99,6 +99,9 @@ class MolecularFF:
     """
 
     COUL_CONST = 332.0636   # kcal·Å / (mol·e²)
+    # Minimum r used for Coulomb during soft-core phase — prevents 1/r singularity
+    # from overwhelming the soft-core LJ linearisation (tunable, units Å).
+    SOFT_CORE_COULOMB_MIN_DIST = 0.3
 
     def __init__(self, nmol, r_switch=0.8):
         """
@@ -513,7 +516,7 @@ class MolecularFF:
         # During soft-core (clash-removal) phase, clamp r to ≥ 0.3 Å so that
         # extremely close atom pairs do not generate astronomical Coulomb
         # gradients that overwhelm the soft-core LJ linearisation.
-        r_coul = r.clamp(min=0.3) if soft_core else r
+        r_coul = r.clamp(min=self.SOFT_CORE_COULOMB_MIN_DIST) if soft_core else r
         E_coul = self.COUL_CONST * self._qi_qj / r_coul
 
         # ── Exclusions (1-2, 1-3) ─────────────────────────────────────────────
@@ -615,6 +618,7 @@ def minimize(mol,
              clash_steps=50,
              clash_lr=0.01,
              clash_grad_clip=10.0,
+             clash_min_r=0.7,           # trigger Phase 0 when any non-excl pair < this [Å]
              # GPU support
              gpu_device=None,          # e.g. torch.device('cuda:0')
              n_cpu_steps=5,            # run this many L-BFGS steps on CPU first
@@ -638,6 +642,8 @@ def minimize(mol,
     clash_steps    : int    steepest-descent steps for clash removal
     clash_lr       : float  step size for clash removal [Å per unit gradient]
     clash_grad_clip: float  gradient clipping norm for clash removal
+    clash_min_r    : float  minimum non-excluded interatomic distance [Å] below
+                            which Phase 0 is triggered (default 0.7 Å)
     gpu_device     : torch.device or None
     n_cpu_steps    : int    L-BFGS steps to run on CPU before GPU transfer
     """
@@ -671,9 +677,9 @@ def minimize(mol,
             exclude = mol.excl_mask | ~mol._triu
             r_nb = r_all.masked_fill(exclude, float('inf'))
             min_r = r_nb.min().item()
-        if min_r < 0.7:
+        if min_r < clash_min_r:
             need_phase0 = True
-            print(f"  ⚠  Close contact detected (min r = {min_r:.3f} Å < 0.7 Å). "
+            print(f"  ⚠  Close contact detected (min r = {min_r:.3f} Å < {clash_min_r:.2f} Å). "
                   f"Running Phase 0 clash removal.")
         else:
             print(f"  ✓  No severe clashes detected (E_hard = {E_hard.item():.3f}, "
