@@ -99,6 +99,9 @@ class MolecularFF:
     """
 
     COUL_CONST = 332.0636   # kcal·Å / (mol·e²)
+    # Minimum r [Å] used for Coulomb during soft-core phase — prevents 1/r singularity
+    # from overwhelming the soft-core LJ linearisation (tunable).
+    SOFT_CORE_COULOMB_MIN_DIST = 0.3  # Å
 
     def __init__(self, nmol, r_switch=0.8):
         """
@@ -249,9 +252,8 @@ class MolecularFF:
         )
         print(f"  [FF] Auto-built {len(excl_pairs)} exclusion pairs, "
               f"{len(pairs_14)} 1-4 pairs from topology.")
-
-        _, pairs_14 = build_excl_and_14( N, bonds, angles, torsions)
-        print(f"  [FF] Auto-built {len(pairs_14)} 1-4 pairs from topology.")
+        # Removed redundant second build_excl_and_14 call that overwrote pairs_14
+        # and printed a confusing duplicate log line.
 
         # ── exclusion / scaling masks ─────────────────────────────────────────
         excl_mask = torch.eye(N, dtype=torch.bool)
@@ -276,7 +278,7 @@ class MolecularFF:
         self._qi_qj    = self.q[:, None] * self.q[None, :]
         self._r2_self  = torch.eye(N, dtype=torch.float64) * 1e10  # avoids /0
 
-        self._r_switch = r_switch
+        self._r_switch = float(r_switch)  # must be float for soft-core LJ cutoff arithmetic
         self._precompute_nb_tables()
         print("✓ done MolFF initialization - ", timestr(t0))
 
@@ -511,7 +513,11 @@ class MolecularFF:
             E_lj = 4.0 * self._eps_ij * (sr6**2 - sr6)
 
         # ── Coulomb ───────────────────────────────────────────────────────────
-        E_coul = self.COUL_CONST * self._qi_qj / r
+        # During soft-core (clash-removal) phase, clamp r to ≥ 0.3 Å so that
+        # extremely close atom pairs do not generate astronomical Coulomb
+        # gradients that overwhelm the soft-core LJ linearisation.
+        r_coul = r.clamp(min=self.SOFT_CORE_COULOMB_MIN_DIST) if soft_core else r
+        E_coul = self.COUL_CONST * self._qi_qj / r_coul
 
         # ── Exclusions (1-2, 1-3) ─────────────────────────────────────────────
         E_lj   = E_lj.masked_fill(self.excl_mask, 0.0)
@@ -612,6 +618,7 @@ def minimize(mol,
              clash_steps=50,
              clash_lr=0.01,
              clash_grad_clip=10.0,
+             clash_min_r=0.7,           # trigger Phase 0 when any non-excl pair < this [Å]
              # GPU support
              gpu_device=None,          # e.g. torch.device('cuda:0')
              n_cpu_steps=5,            # run this many L-BFGS steps on CPU first
@@ -635,6 +642,8 @@ def minimize(mol,
     clash_steps    : int    steepest-descent steps for clash removal
     clash_lr       : float  step size for clash removal [Å per unit gradient]
     clash_grad_clip: float  gradient clipping norm for clash removal
+    clash_min_r    : float  minimum non-excluded interatomic distance [Å] below
+                            which Phase 0 is triggered (default 0.7 Å)
     gpu_device     : torch.device or None
     n_cpu_steps    : int    L-BFGS steps to run on CPU before GPU transfer
     """
@@ -656,6 +665,25 @@ def minimize(mol,
     with torch.no_grad():
         E_hard = mol.total_energy(soft_core=False)
     need_phase0 = not torch.isfinite(E_hard) or E_hard.item() > 1e6
+
+    # Also trigger Phase 0 when the minimum non-excluded interatomic distance
+    # is below 0.7 Å — a finite total energy can still hide catastrophic close
+    # contacts whose 1/r² Coulomb gradient will immediately produce NaN.
+    if not need_phase0:
+        with torch.no_grad():
+            diff = mol.coords[:, None, :] - mol.coords[None, :, :]  # [N,N,3]
+            r_all = (diff.square().sum(-1) + mol._r2_self).sqrt()
+            # Exclude self-interactions and 1-2/1-3 pairs (same as NB potential)
+            exclude = mol.excl_mask | ~mol._triu
+            r_nb = r_all.masked_fill(exclude, float('inf'))
+            min_r = r_nb.min().item()
+        if min_r < clash_min_r:
+            need_phase0 = True
+            print(f"  ⚠  Close contact detected (min r = {min_r:.3f} Å < {clash_min_r:.3f} Å). "
+                  f"Running Phase 0 clash removal.")
+        else:
+            print(f"  ✓  No severe clashes detected (E_hard = {E_hard.item():.3f}, "
+                  f"min r = {min_r:.3f} Å). Skipping Phase 0.")
 
     if need_phase0:
         print(f"\n  ⚡ Phase 0: clash removal  ({clash_steps} SD steps, "
@@ -681,13 +709,10 @@ def minimize(mol,
         with torch.no_grad():
             E_now = mol.total_energy(soft_core=True)
         if not torch.isfinite(E_now):
-            print("  ⚠  Hard-core energy still NaN after clash removal. "
+            print("  ⚠  Soft-core energy still NaN after clash removal. "
                   "Try more clash_steps or smaller clash_lr.")
         else:
-            print(f"  ✓  Hard-core energy after clash removal: {E_now.item():.3f} kcal/mol")
-    else:
-        print(f"  ✓  No severe clashes detected (E_hard = {E_hard.item():.3f}). "
-              f"Skipping Phase 0.")
+            print(f"  ✓  Soft-core energy after clash removal: {E_now.item():.3f} kcal/mol")
 
     # =========================================================================
     # Phase 1 — L-BFGS with hard-core LJ  (CPU then optional GPU)
@@ -770,8 +795,11 @@ def minimize(mol,
             optimizer.zero_grad()
             E = mol.total_energy(soft_core=False)
             if not torch.isfinite(E):
-                # Fall back: return a large finite value so LBFGS backs off
-                E = mol.coords.new_tensor(1e12)
+                # Fall back to a large value that still depends on mol.coords so
+                # it has a grad_fn; mol.coords.new_tensor(1e12) is a constant
+                # (no grad_fn) and calling backward() on it would raise the
+                # "does not require grad" error seen in practice.
+                E = mol.coords.sum() * 0.0 + 1e12
             E.backward()
             return E
 
