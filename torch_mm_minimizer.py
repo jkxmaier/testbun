@@ -507,7 +507,10 @@ class MolecularFF:
             E_soft = E_sw + dE_sw * (r - rs)
             in_soft = (r < rs) & ~self._r2_self.bool()
             E_lj = torch.where(in_soft, E_soft, E_hard)
+
+            r_coul = r.clamp(min=0.3)
         else:
+            r_coul = r
             sr2  = self._sigma_ij**2 / r2
             sr6  = sr2**3
             E_lj = 4.0 * self._eps_ij * (sr6**2 - sr6)
@@ -516,7 +519,7 @@ class MolecularFF:
         # During soft-core (clash-removal) phase, clamp r to ≥ 0.3 Å so that
         # extremely close atom pairs do not generate astronomical Coulomb
         # gradients that overwhelm the soft-core LJ linearisation.
-        r_coul = r.clamp(min=self.SOFT_CORE_COULOMB_MIN_DIST) if soft_core else r
+        #r_coul = r.clamp(min=self.SOFT_CORE_COULOMB_MIN_DIST) if soft_core else r
         E_coul = self.COUL_CONST * self._qi_qj / r_coul
 
         # ── Exclusions (1-2, 1-3) ─────────────────────────────────────────────
