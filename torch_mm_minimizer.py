@@ -99,9 +99,9 @@ class MolecularFF:
     """
 
     COUL_CONST = 332.0636   # kcal·Å / (mol·e²)
-    # Minimum r used for Coulomb during soft-core phase — prevents 1/r singularity
-    # from overwhelming the soft-core LJ linearisation (tunable, units Å).
-    SOFT_CORE_COULOMB_MIN_DIST = 0.3
+    # Minimum r [Å] used for Coulomb during soft-core phase — prevents 1/r singularity
+    # from overwhelming the soft-core LJ linearisation (tunable).
+    SOFT_CORE_COULOMB_MIN_DIST = 0.3  # Å
 
     def __init__(self, nmol, r_switch=0.8):
         """
@@ -679,7 +679,7 @@ def minimize(mol,
             min_r = r_nb.min().item()
         if min_r < clash_min_r:
             need_phase0 = True
-            print(f"  ⚠  Close contact detected (min r = {min_r:.3f} Å < {clash_min_r:.2f} Å). "
+            print(f"  ⚠  Close contact detected (min r = {min_r:.3f} Å < {clash_min_r:.3f} Å). "
                   f"Running Phase 0 clash removal.")
         else:
             print(f"  ✓  No severe clashes detected (E_hard = {E_hard.item():.3f}, "
