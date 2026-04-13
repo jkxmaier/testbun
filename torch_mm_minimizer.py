@@ -101,7 +101,7 @@ class MolecularFF:
     COUL_CONST = 332.0636   # kcal·Å / (mol·e²)
     # Minimum r [Å] used for Coulomb during soft-core phase — prevents 1/r singularity
     # from overwhelming the soft-core LJ linearisation (tunable).
-    SOFT_CORE_COULOMB_MIN_DIST = 0.3  # Å
+    SOFT_CORE_MIN_DIST = 0.3  # Å — min r used for both LJ and Coulomb in soft-core mode
 
     def __init__(self, nmol, r_switch=0.8):
         """
@@ -381,7 +381,7 @@ class MolecularFF:
                   f"{math.degrees(mx):.1f}°]  — looks like radians ✓")
 
     def nan_report(self):
-        """Identify which energy term produced NaN/Inf."""
+        """Identify which energy term produced NaN/Inf (no_grad — fast scalar check)."""
         results = {}
         for name, fn in [('bond',     self.E_bond),
                          ('angle',    self.E_angle),
@@ -397,6 +397,64 @@ class MolecularFF:
         for k, v in results.items():
             flag = '  ⚠  NaN/Inf!' if isinstance(v, float) and not math.isfinite(v) else ''
             print(f"  {k:10s}  {str(v):>20}{flag}")
+        return results
+
+    def nan_report_grad(self, check_grads=True):
+        """
+        Identify which energy term produces NaN/Inf WITH autograd enabled.
+
+        Unlike nan_report(), this runs the forward pass under normal autograd
+        so it catches cases where the value is finite but the gradient is not
+        (e.g. from acos near ±1, or LJ at very small r).  Use this when
+        nan_report() shows finite values yet the optimiser still produces NaN.
+
+        Parameters
+        ----------
+        check_grads : bool
+            If True, also attempt backward() on each term and report whether
+            the gradient on mol.coords is finite.
+        """
+        print("  [nan_report_grad] Checking each energy term with autograd enabled …")
+        results = {}
+        for name, fn in [('bond',     self.E_bond),
+                         ('angle',    self.E_angle),
+                         ('torsion',  self.E_torsion),
+                         ('improper', self.E_improper),
+                         ('nonbond',  self.E_nonbonded)]:
+            try:
+                if self.coords.grad is not None:
+                    self.coords.grad.zero_()
+                E = fn()
+                v = E.item()
+                results[name] = v
+                grad_ok = None
+                if check_grads:
+                    try:
+                        if not E.requires_grad:
+                            # constant term (e.g. empty impropers returns 0);
+                            # backward would error, but gradient is trivially 0
+                            grad_ok = True
+                        else:
+                            E.backward()
+                            g = self.coords.grad
+                            grad_ok = (g is not None) and torch.isfinite(g).all().item()
+                    except Exception as ge:
+                        grad_ok = f'ERROR: {ge}'
+                flag = ''
+                if isinstance(v, float) and not math.isfinite(v):
+                    flag = '  ⚠  NaN/Inf (forward)!'
+                elif grad_ok is False:
+                    flag = '  ⚠  NaN/Inf gradient!'
+                elif isinstance(grad_ok, str):
+                    flag = f'  ⚠  grad ERROR: {grad_ok}'
+                grad_str = '' if grad_ok is None else f'  grad_ok={grad_ok}'
+                print(f"  {name:10s}  {v:>20.6f}{grad_str}{flag}")
+            except Exception as exc:
+                results[name] = f'ERROR: {exc}'
+                print(f"  {name:10s}  {'ERROR':>20}  {exc}")
+        # restore clean grad state
+        if self.coords.grad is not None:
+            self.coords.grad.zero_()
         return results
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -491,6 +549,14 @@ class MolecularFF:
 
         # ── Lennard-Jones ─────────────────────────────────────────────────────
         if soft_core:
+            # Clamp r and r² for ALL soft-core computations.  torch.where
+            # differentiates through both branches, so computing E_hard with
+            # raw r2 would produce NaN/Inf gradients for clashing pairs even
+            # when the soft branch is selected.  Using r_sc/r2_sc keeps every
+            # expression in the autograd graph finite.
+            r_sc  = r.clamp(min=self.SOFT_CORE_MIN_DIST)
+            r2_sc = r_sc ** 2
+
             # Below r_switch: replace LJ with a linear cap E = a + b*r
             # matched in value and first derivative at r_switch.
             rs  = self._r_switch
@@ -501,14 +567,14 @@ class MolecularFF:
             E_sw  = 4.0 * self._eps_ij * (sr6_sw**2 - sr6_sw)
             dE_sw = 4.0 * self._eps_ij * (-12.0 * sr6_sw**2 / rs
                                            + 6.0 * sr6_sw / rs)
-            E_hard = 4.0 * self._eps_ij * ((self._sigma_ij**2/r2)**3)**2 \
-                   - 4.0 * self._eps_ij * (self._sigma_ij**2/r2)**3
+            E_hard = 4.0 * self._eps_ij * ((self._sigma_ij**2/r2_sc)**3)**2 \
+                   - 4.0 * self._eps_ij * (self._sigma_ij**2/r2_sc)**3
             # Linear cap for r < r_switch
-            E_soft = E_sw + dE_sw * (r - rs)
-            in_soft = (r < rs) & ~self._r2_self.bool()
+            E_soft = E_sw + dE_sw * (r_sc - rs)
+            in_soft = (r_sc < rs) & ~self._r2_self.bool()
             E_lj = torch.where(in_soft, E_soft, E_hard)
 
-            r_coul = r.clamp(min=0.3)
+            r_coul = r_sc   # already clamped; same constant for LJ and Coulomb
         else:
             r_coul = r
             sr2  = self._sigma_ij**2 / r2
@@ -516,10 +582,9 @@ class MolecularFF:
             E_lj = 4.0 * self._eps_ij * (sr6**2 - sr6)
 
         # ── Coulomb ───────────────────────────────────────────────────────────
-        # During soft-core (clash-removal) phase, clamp r to ≥ 0.3 Å so that
-        # extremely close atom pairs do not generate astronomical Coulomb
+        # In soft-core mode r_coul = r_sc (clamped to ≥ SOFT_CORE_MIN_DIST)
+        # so extremely close atom pairs do not generate astronomical Coulomb
         # gradients that overwhelm the soft-core LJ linearisation.
-        #r_coul = r.clamp(min=self.SOFT_CORE_COULOMB_MIN_DIST) if soft_core else r
         E_coul = self.COUL_CONST * self._qi_qj / r_coul
 
         # ── Exclusions (1-2, 1-3) ─────────────────────────────────────────────
@@ -536,62 +601,6 @@ class MolecularFF:
         return (E_lj + E_coul)[self._triu].sum()
 
 
-    def E_nonbonded2(self, soft_core=False):
-        """
-        LJ 12-6 + Coulomb.
-
-        soft_core=True  — use a linearised LJ below r_switch so that clashing
-                          atoms produce a finite (large but not Inf) energy and
-                          a well-defined gradient.  Use this for the pre-minimisation
-                          clash-removal phase; switch back to hard-core for
-                          production minimisation.
-        """
-        N = self.coords.shape[0]
-        if N < 2:
-            return self.coords.new_zeros(())
-
-        diff = self.coords[:, None, :] - self.coords[None, :, :]   # [N,N,3]
-        r2   = (diff**2).sum(dim=-1) + self._r2_self               # [N,N]
-        #r    = r2.sqrt()
-        r    = r2.sqrt().clamp(min=1e-8)
-        # ── Lennard-Jones ─────────────────────────────────────────────────────
-        if soft_core:
-            # Below r_switch: replace LJ with a linear cap E = a + b*r
-            # matched in value and first derivative at r_switch.
-            rs  = self._r_switch
-            rs2 = rs * rs
-            sr2_sw = self._sigma_ij**2 / rs2
-            sr6_sw = sr2_sw**3
-            # LJ value and slope at r_switch
-            E_sw  = 4.0 * self._eps_ij * (sr6_sw**2 - sr6_sw)
-            dE_sw = 4.0 * self._eps_ij * (-12.0 * sr6_sw**2 / rs
-                                           + 6.0 * sr6_sw / rs)
-            E_hard = 4.0 * self._eps_ij * ((self._sigma_ij**2/r2)**3)**2 \
-                   - 4.0 * self._eps_ij * (self._sigma_ij**2/r2)**3
-            # Linear cap for r < r_switch
-            E_soft = E_sw + dE_sw * (r - rs)
-            in_soft = (r < rs) & ~self._r2_self.bool()
-            E_lj = torch.where(in_soft, E_soft, E_hard)
-        else:
-            sr2  = self._sigma_ij**2 / r2
-            sr6  = sr2**3
-            E_lj = 4.0 * self._eps_ij * (sr6**2 - sr6)
-
-        # ── Coulomb ───────────────────────────────────────────────────────────
-        E_coul = self.COUL_CONST * self._qi_qj / r
-
-        # ── Exclusions (1-2, 1-3) ─────────────────────────────────────────────
-        E_lj   = E_lj.masked_fill(self.excl_mask, 0.0)
-        E_coul = E_coul.masked_fill(self.excl_mask, 0.0)
-
-        # ── 1-4 scaling  FIX: (sc14-1)*E_14  not sc14*E_14 ───────────────────
-        #   Starting from full matrices (factor 1.0 everywhere that's not excluded),
-        #   correct 1-4 pairs from 1.0 to sc14_vdw / sc14_coul:
-        E_lj   = E_lj   + (self.sc14_vdw  - 1.0) * E_lj.masked_fill(  ~self.mask14, 0.0)
-        E_coul = E_coul + (self.sc14_coul - 1.0) * E_coul.masked_fill(~self.mask14, 0.0)
-
-        # ── Sum upper triangle ────────────────────────────────────────────────
-        return (E_lj + E_coul)[self._triu].sum()
     # ──────────────────────────────────────────────────────────────────────────
     # Total energy  (returns individual components + sum)
     # ──────────────────────────────────────────────────────────────────────────
@@ -614,6 +623,7 @@ class MolecularFF:
 
 def minimize(mol,
              adam_steps=300, adam_lr=1e-3,
+             adam_softcore_steps=25,    # use soft-core for first N Adam steps
              max_steps=500,
              tol_grad=1e-3,
              tol_change=1e-9,
@@ -621,7 +631,7 @@ def minimize(mol,
              clash_steps=50,
              clash_lr=0.01,
              clash_grad_clip=10.0,
-             clash_min_r=0.7,           # trigger Phase 0 when any non-excl pair < this [Å]
+             clash_min_r=1.2,           # trigger Phase 0 when any non-excl pair < this [Å]
              # GPU support
              gpu_device=None,          # e.g. torch.device('cuda:0')
              n_cpu_steps=5,            # run this many L-BFGS steps on CPU first
@@ -633,22 +643,28 @@ def minimize(mol,
                Resolves severe clashes that would give NaN/Inf in LJ.
                Runs entirely on CPU (cheap; just removes worst contacts).
 
-    Phase 1 — L-BFGS with hard-core LJ.
-               Runs first n_cpu_steps on CPU, then migrates to gpu_device
-               if one is provided (and available).
+    Phase 1 — Adam warmup (soft-core for first adam_softcore_steps steps,
+               then hard-core) followed by L-BFGS with hard-core LJ.
+               L-BFGS runs first n_cpu_steps on CPU, then migrates to
+               gpu_device if one is provided (and available).
 
     Parameters
     ----------
-    mol            : MolecularFF
-    max_steps      : int    max L-BFGS outer iterations
-    tol_grad       : float  |F|_max convergence threshold [kcal/mol/Å]
-    clash_steps    : int    steepest-descent steps for clash removal
-    clash_lr       : float  step size for clash removal [Å per unit gradient]
-    clash_grad_clip: float  gradient clipping norm for clash removal
-    clash_min_r    : float  minimum non-excluded interatomic distance [Å] below
-                            which Phase 0 is triggered (default 0.7 Å)
-    gpu_device     : torch.device or None
-    n_cpu_steps    : int    L-BFGS steps to run on CPU before GPU transfer
+    mol                 : MolecularFF
+    adam_steps          : int    Adam pre-conditioning steps
+    adam_lr             : float  Adam learning rate
+    adam_softcore_steps : int    use soft-core energy for the first N Adam
+                                 steps (default 25); prevents NaN at step 0
+                                 for proteins with residual close contacts
+    max_steps           : int    max L-BFGS outer iterations
+    tol_grad            : float  |F|_max convergence threshold [kcal/mol/Å]
+    clash_steps         : int    steepest-descent steps for clash removal
+    clash_lr            : float  step size for clash removal [Å per unit gradient]
+    clash_grad_clip     : float  gradient clipping norm for clash removal
+    clash_min_r         : float  minimum non-excluded interatomic distance [Å] below
+                                 which Phase 0 is triggered (default 1.2 Å)
+    gpu_device          : torch.device or None
+    n_cpu_steps         : int    L-BFGS steps to run on CPU before GPU transfer
     """
 
     # ── check for NaN in initial structure ───────────────────────────────────
@@ -670,8 +686,8 @@ def minimize(mol,
     need_phase0 = not torch.isfinite(E_hard) or E_hard.item() > 1e6
 
     # Also trigger Phase 0 when the minimum non-excluded interatomic distance
-    # is below 0.7 Å — a finite total energy can still hide catastrophic close
-    # contacts whose 1/r² Coulomb gradient will immediately produce NaN.
+    # is below clash_min_r — a finite total energy can still hide catastrophic
+    # close contacts whose 1/r² Coulomb gradient will immediately produce NaN.
     if not need_phase0:
         with torch.no_grad():
             diff = mol.coords[:, None, :] - mol.coords[None, :, :]  # [N,N,3]
@@ -696,9 +712,23 @@ def minimize(mol,
             if mol.coords.grad is not None:
                 mol.coords.grad.zero_()
             E = mol.total_energy(soft_core=True)
+            # Guard: non-finite energy — stop before backward to avoid cascading NaNs
+            if not torch.isfinite(E):
+                print(f"  ⚠  Phase 0 step {step}: E is non-finite ({E.item()}), "
+                      f"stopping Phase 0 early.")
+                mol.coords.requires_grad_(True)
+                break
             E.backward()
             with torch.no_grad():
                 g = mol.coords.grad
+                # Guard: non-finite gradient — diagnose and stop rather than
+                # updating coordinates with NaN values
+                if g is None or not torch.isfinite(g).all():
+                    print(f"  ⚠  Phase 0 step {step}: gradient has non-finite values, "
+                          f"stopping Phase 0 early.")
+                    mol.nan_report_grad()
+                    mol.coords.requires_grad_(True)
+                    break
                 gnorm = g.norm()
                 if gnorm > clash_grad_clip:
                     g = g * (clash_grad_clip / gnorm)
@@ -723,15 +753,22 @@ def minimize(mol,
 
 
     # ── Phase 1: Adam  (robust for ill-conditioned / badly placed H atoms) ──
-    print(f"\n  Phase 1: Adam  ({adam_steps} steps, lr={adam_lr})")
+    print(f"\n  Phase 1: Adam  ({adam_steps} steps, lr={adam_lr}, "
+          f"soft-core for first {adam_softcore_steps} steps)")
     print(f"  {'Step':>6}  {'E_tot':>13}  {'E_bond':>9}  {'E_angle':>9}  {'|F|_max':>9}")
 
     adam = optim.Adam([mol.coords], lr=adam_lr)
     for step in range(adam_steps):
+        use_soft = step < adam_softcore_steps
         adam.zero_grad()
-        E = mol.total_energy()
+        E = mol.total_energy(soft_core=use_soft)
         if not torch.isfinite(E):
-            print(f"  ⚠  NaN at Adam step {step}"); break
+            if step == 0:
+                print(f"  ⚠  NaN at Adam step 0. Running nan_report_grad …")
+                mol.nan_report_grad()
+            else:
+                print(f"  ⚠  NaN at Adam step {step}")
+            break
         E.backward()
 
         # gradient clipping: prevents Adam exploding on the worst clashes
@@ -818,8 +855,12 @@ def minimize(mol,
             E_tot = (Eb + Ea + Et + Ei + Enb)
 
         if not torch.isfinite(E_tot):
-            print(f"  ⚠  NaN/Inf at step {step}. Running nan_report …")
-            mol.nan_report()
+            if step == 0:
+                print(f"  ⚠  NaN/Inf at step {step}. Running nan_report_grad …")
+                mol.nan_report_grad()
+            else:
+                print(f"  ⚠  NaN/Inf at step {step}. Running nan_report …")
+                mol.nan_report()
             break
 
         grad = mol.coords.grad
