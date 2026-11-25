@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1018">
+  <title>Atlas — Scientific Workbench</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./src/styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div class="brand-name">ATLAS<span> / WORKBENCH</span></div>
+      </div>
+      <div class="project-context">
+        <span class="crumb-muted">PROJECTS</span><span class="crumb-slash">/</span>
+        <span class="project-name">Interface analysis</span>
+        <span class="saved-indicator"><i></i> All changes saved</span>
+      </div>
+      <div class="top-actions">
+        <button class="top-icon" id="openProjectBtn" title="Open project" aria-label="Open project">▱</button>
+        <button class="top-icon" id="helpBtn" title="Keyboard shortcuts" aria-label="Help">?</button>
+        <div class="avatar">JM</div>
+      </div>
+    </header>
+
+    <main class="workspace" id="workspace">
+      <section class="pane pane-visual" id="visualPane">
+        <div class="pane-main">
+          <div class="pane-heading">
+            <div>
+              <div class="eyebrow">VIEWPORT 01 <span class="live-dot"></span></div>
+              <h1>3D Scene</h1>
+            </div>
+            <div class="pane-heading-actions">
+              <span class="scene-chip" id="sceneStatus">DEMO SCENE</span>
+              <button class="icon-button" id="maximize3d" title="Maximize pane" aria-label="Maximize 3D pane">⛶</button>
+            </div>
+          </div>
+          <div class="viewport-wrap" id="viewportWrap">
+            <div id="threeViewport" class="three-viewport" aria-label="Interactive 3D viewport"></div>
+            <div class="viewport-overlay top-left">
+              <span class="axis-label">PERSPECTIVE</span>
+              <span class="axis-separator"></span>
+              <span class="axis-label" id="modelLabel">UNTITLED MODEL</span>
+            </div>
+            <div class="viewport-overlay bottom-left">
+              <span class="key-hint"><kbd>DRAG</kbd> ORBIT</span>
+              <span class="key-hint"><kbd>SCROLL</kbd> ZOOM</span>
+              <span class="key-hint"><kbd>RIGHT DRAG</kbd> PAN</span>
+            </div>
+            <div class="viewport-overlay bottom-right">
+              <button class="view-control" id="resetCamera" title="Reset camera">⌖</button>
+              <button class="view-control active" id="toggleGrid" title="Toggle grid">▦</button>
+              <button class="view-control" id="toggleAxes" title="Toggle axes">⌗</button>
+            </div>
+            <div class="drop-hint" id="dropHint"><strong>Drop a 3D model</strong><span>GLB, GLTF or OBJ</span></div>
+          </div>
+          <div class="viewport-meta">
+            <div class="meta-group"><span>ENGINE</span><b>THREE.JS</b><span class="meta-divider"></span><span>RENDERER</span><b id="rendererLabel">WEBGL</b></div>
+            <div class="meta-group"><span>OBJECTS</span><b id="objectCount">—</b><span class="meta-divider"></span><span>FPS</span><b id="fpsValue">—</b></div>
+          </div>
+        </div>
+        <aside class="tool-rail" aria-label="3D tools">
+          <button class="rail-button selected" data-tool="scene" title="Scene settings"><span>◈</span></button>
+          <button class="rail-button" data-tool="layers" title="Layers"><span>▤</span></button>
+          <button class="rail-button" data-tool="appearance" title="Appearance"><span>◐</span></button>
+          <button class="rail-button" data-tool="measure" title="Measurement tools"><span>⌁</span></button>
+          <div class="rail-spacer"></div>
+          <button class="rail-button" data-tool="import" title="Import model"><span>↥</span></button>
+          <button class="rail-button" data-tool="settings" title="Viewer settings"><span>⚙</span></button>
+        </aside>
+      </section>
+
+      <div class="splitter" id="splitter" role="separator" aria-label="Resize panes" aria-orientation="vertical" tabindex="0"></div>
+
+      <section class="pane pane-data" id="dataPane">
+        <div class="pane-main data-main">
+          <div class="pane-heading data-heading">
+            <div>
+              <div class="eyebrow">INSPECTOR 02</div>
+              <h1>Data workspace</h1>
+            </div>
+            <div class="pane-heading-actions">
+              <button class="icon-button" id="maximizeData" title="Maximize pane" aria-label="Maximize data pane">⛶</button>
+            </div>
+          </div>
+          <div class="data-tabs" role="tablist">
+            <button class="data-tab active" data-tab="overview" role="tab">Overview</button>
+            <button class="data-tab" data-tab="images" role="tab">Images <span class="tab-count" id="imageCount">03</span></button>
+            <button class="data-tab" data-tab="table" role="tab">Data table</button>
+            <button class="data-tab" data-tab="plot" role="tab">Plots</button>
+          </div>
+
+          <div class="tab-panel active" id="tab-overview">
+            <div class="section-line"><span>VISUAL RECORDS</span><button class="text-button" data-switch-tab="images">VIEW ALL ↗</button></div>
+            <div class="image-grid" id="overviewImages">
+              <button class="image-card" data-preview="surface"><img src="https://images.unsplash.com/photo-1530210124550-912dc1381cb8?w=600&q=85" alt="Scientific molecular surface rendering"><span class="image-card-caption"><b>Surface rendering</b><small>PNG · 2.4 MB</small></span></button>
+              <button class="image-card" data-preview="density"><img src="https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=600&q=85" alt="Laboratory visualization"><span class="image-card-caption"><b>Density map</b><small>TIFF · 8.1 MB</small></span></button>
+              <button class="image-card" data-preview="microscopy"><img src="https://images.unsplash.com/photo-1579154204601-01588f351e67?w=600&q=85" alt="Microscopy image"><span class="image-card-caption"><b>Microscopy</b><small>PNG · 1.2 MB</small></span></button>
+            </div>
+            <div class="section-line table-section-line"><span>KEY METRICS</span><span class="muted-note">SAMPLE DATA</span></div>
+            <div class="metric-grid">
+              <div class="metric-card"><span>MODEL CONFIDENCE</span><strong>0.94</strong><small class="positive">↑ 2.3% <i>vs. previous</i></small></div>
+              <div class="metric-card"><span>INTERFACE AREA</span><strong>1,284 <em>Å²</em></strong><small>Calculated estimate</small></div>
+              <div class="metric-card"><span>CONTACTS</span><strong>186</strong><small>Within 5.0 Å</small></div>
+            </div>
+            <div class="activity-card">
+              <div class="activity-icon">✓</div>
+              <div><b>Analysis workspace initialized</b><small>Demo data loaded · just now</small></div>
+              <span class="activity-tag">READY</span>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="tab-images">
+            <div class="section-line"><span>IMAGE LIBRARY</span><button class="text-button" id="uploadImagesBtn">＋ ADD IMAGES</button></div>
+            <div class="gallery-grid" id="imageGallery">
+              <button class="gallery-card" data-preview="surface"><img src="https://images.unsplash.com/photo-1530210124550-912dc1381cb8?w=800&q=85" alt="Surface rendering"><span>Surface rendering</span></button>
+              <button class="gallery-card" data-preview="density"><img src="https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=800&q=85" alt="Density map"><span>Density map</span></button>
+              <button class="gallery-card" data-preview="microscopy"><img src="https://images.unsplash.com/photo-1579154204601-01588f351e67?w=800&q=85" alt="Microscopy"><span>Microscopy</span></button>
+            </div>
+            <div class="upload-target" id="imageDrop"><span>＋</span><b>Drop images here or browse</b><small>PNG, JPG, WEBP, TIFF (browser support varies)</small></div>
+          </div>
+
+          <div class="tab-panel" id="tab-table">
+            <div class="section-line"><span>RESIDUE METRICS</span><span class="muted-note">DEMO DATASET · 12 ROWS</span></div>
+            <div class="table-toolbar"><label class="search-field"><span>⌕</span><input id="tableSearch" type="search" placeholder="Filter residues…"></label><button class="small-outline" id="exportCsv">↓ EXPORT CSV</button></div>
+            <div class="table-scroll">
+              <table id="metricsTable">
+                <thead><tr><th data-sort="residue">RESIDUE ↕</th><th data-sort="chain">CHAIN ↕</th><th data-sort="depth">DEPTH (Å) ↕</th><th data-sort="score">SCORE ↕</th><th>STATUS</th></tr></thead>
+                <tbody id="metricsBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="tab-plot">
+            <div class="section-line"><span>METRIC DISTRIBUTION</span><span class="muted-note">ILLUSTRATIVE DATA</span></div>
+            <div class="plot-card">
+              <div class="plot-heading"><div><b>Residue depth profile</b><small>Depth by residue index</small></div><span class="plot-legend"><i></i> DEPTH</span></div>
+              <canvas id="plotCanvas" height="230"></canvas>
+              <div class="plot-axis-labels"><span>RESIDUE INDEX</span><span>DEPTH (Å)</span></div>
+            </div>
+            <div class="plot-card compact-plot">
+              <div class="plot-heading"><div><b>Score distribution</b><small>Confidence score bins</small></div></div>
+              <div class="bar-chart" id="barChart"></div>
+            </div>
+          </div>
+        </div>
+        <aside class="tool-rail data-rail" aria-label="Data tools">
+          <button class="rail-button selected" data-data-tool="inspector" title="Inspector"><span>▣</span></button>
+          <button class="rail-button" data-data-tool="filters" title="Filters"><span>▽</span></button>
+          <button class="rail-button" data-data-tool="visuals" title="Visualization options"><span>▧</span></button>
+          <div class="rail-spacer"></div>
+          <button class="rail-button" data-data-tool="export" title="Export"><span>⇩</span></button>
+          <button class="rail-button" data-data-tool="data-settings" title="Data settings"><span>⚙</span></button>
+        </aside>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <div><span class="status-light"></span><b>READY</b><span class="footer-divider"></span><span id="statusMessage">Workspace initialized</span></div>
+      <div><span>LOCAL SESSION</span><span class="footer-divider"></span><span id="clock">--:--:--</span></div>
+    </footer>
+  </div>
+
+  <input type="file" id="modelInput" accept=".glb,.gltf,.obj" hidden multiple>
+  <input type="file" id="imageInput" accept="image/*" hidden multiple>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="settings-drawer" id="settingsDrawer" aria-hidden="true">
+    <div class="drawer-header"><div><div class="eyebrow" id="drawerEyebrow">VIEWPORT SETTINGS</div><h2 id="drawerTitle">Scene settings</h2></div><button class="icon-button" id="closeDrawer" aria-label="Close settings">×</button></div>
+    <div class="drawer-content" id="drawerContent"></div>
+  </aside>
+
+  <div class="modal-backdrop" id="previewModal">
+    <div class="preview-dialog"><div class="preview-top"><div><div class="eyebrow">IMAGE PREVIEW</div><b id="previewTitle">Image</b></div><button class="icon-button" id="closePreview">×</button></div><img id="previewImage" src="" alt="Selected image preview"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
